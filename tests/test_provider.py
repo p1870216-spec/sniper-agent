@@ -11,7 +11,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.providers.twitterapi_io import extract_tweets, normalize_tweet
+import httpx
+
+from app.providers.twitterapi_io import (
+    TwitterApiIoError,
+    _checked,
+    build_rule_values,
+    extract_tweets,
+    normalize_tweet,
+)
 
 # Конверт настоящий: твиты лежат в data.tweets, а не в топ-левел tweets.
 LAST_TWEETS_RESPONSE = {
@@ -93,6 +101,47 @@ def test_retweet_detected_by_object():
     payload["retweeted_tweet"] = {"id": "1", "text": "оригинал"}
     payload["text"] = "RT @someone: обрезанный хвост…"
     assert normalize_tweet(payload).is_retweet
+
+
+def test_rule_values_single_chunk():
+    assert build_rule_values(["elonmusk", "@aeyakovenko"]) == [
+        "from:elonmusk OR from:aeyakovenko"
+    ]
+
+
+def test_rule_values_respect_length_limit():
+    """value у них ограничен 255 символами — длинный список режем."""
+    handles = [f"kol{i:02d}" for i in range(40)]
+    values = build_rule_values(handles)
+    assert len(values) > 1
+    assert all(len(v) <= 255 for v in values)
+    # ни один аккаунт не потерялся и не продублировался
+    joined = " OR ".join(values).split(" OR ")
+    assert joined == [f"from:{h}" for h in handles]
+
+
+def test_checked_raises_on_status_error():
+    """Отказы oapi приезжают с HTTP 200 — raise_for_status их не ловит."""
+    resp = httpx.Response(
+        200,
+        json={"status": "error", "msg": "update rule failed"},
+        request=httpx.Request("POST", "https://api.twitterapi.io/oapi/tweet_filter/update_rule"),
+    )
+    try:
+        _checked(resp)
+    except TwitterApiIoError as exc:
+        assert "update rule failed" in str(exc)
+    else:
+        raise AssertionError("отказ с 200 проехал незамеченным")
+
+
+def test_checked_passes_success():
+    resp = httpx.Response(
+        200,
+        json={"status": "success", "rule_id": "abc"},
+        request=httpx.Request("POST", "https://api.twitterapi.io/oapi/tweet_filter/add_rule"),
+    )
+    assert _checked(resp)["rule_id"] == "abc"
 
 
 if __name__ == "__main__":

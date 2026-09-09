@@ -1,7 +1,7 @@
 """Адаптер twitterapi.io.
 
 Два режима:
-  * stream  — регистрируем аккаунты в их мониторинге, они шлют нам вебхук.
+  * stream  — заводим правила tweet_filter, они шлют нам вебхук.
               Основной режим: дешевле и быстрее поллинга.
   * polling — /twitter/user/last_tweets по кругу. Запасной вариант, дороже.
               В их же доках написано не дёргать этот эндпоинт часто.
@@ -26,6 +26,23 @@ from app.config import Settings
 from app.models import Tweet
 
 log = logging.getLogger(__name__)
+
+
+class TwitterApiIoError(RuntimeError):
+    """Отказ, пришедший с HTTP 200.
+
+    У них ошибки oapi-эндпоинтов приезжают в теле как {"status": "error"},
+    статус при этом 200 — raise_for_status() такое молча пропускает.
+    """
+
+
+def _checked(resp: httpx.Response) -> dict[str, Any]:
+    """raise_for_status + проверка поля status в теле."""
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and data.get("status") == "error":
+        raise TwitterApiIoError(str(data.get("msg") or "без сообщения"))
+    return data if isinstance(data, dict) else {}
 
 
 def _parse_created_at(value: Any) -> datetime:
@@ -89,6 +106,30 @@ def normalize_tweet(payload: dict[str, Any]) -> Tweet | None:
     )
 
 
+# Тег, по которому узнаём свои правила среди чужих в том же аккаунте.
+RULE_TAG_PREFIX = "sniper"
+
+# Лимит поля value у них — 255 символов, длинный список KOL режем на части.
+RULE_VALUE_LIMIT = 255
+
+
+def build_rule_values(handles: list[str], limit: int = RULE_VALUE_LIMIT) -> list[str]:
+    """Собирает выражения вида "from:a OR from:b" в пределах лимита value."""
+    values: list[str] = []
+    current: list[str] = []
+    for handle in handles:
+        term = f"from:{handle.lstrip('@')}"
+        candidate = " OR ".join(current + [term])
+        if current and len(candidate) > limit:
+            values.append(" OR ".join(current))
+            current = [term]
+        else:
+            current.append(term)
+    if current:
+        values.append(" OR ".join(current))
+    return values
+
+
 def extract_tweets(payload: dict[str, Any]) -> list[Tweet]:
     """Достаёт твиты из тела вебхука или из ответа last_tweets.
 
@@ -126,22 +167,82 @@ class TwitterApiIoClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def register_stream(self, handles: list[str], webhook_url: str) -> None:
-        """Подписывает аккаунты на мониторинг с доставкой в наш вебхук.
+    async def list_rules(self) -> list[dict[str, Any]]:
+        resp = await self._client.get("/oapi/tweet_filter/get_rules")
+        return _checked(resp).get("rules") or []
 
-        Путь эндпоинта сверь с доками перед первым запуском — у них есть
-        отдельный раздел про stream/webhook, и он обновляется.
+    async def delete_rule(self, rule_id: str) -> None:
+        resp = await self._client.request(
+            "DELETE", "/oapi/tweet_filter/delete_rule", json={"rule_id": rule_id}
+        )
+        _checked(resp)
+
+    async def register_stream(
+        self, handles: list[str], interval_seconds: float | None = None
+    ) -> list[str]:
+        """Заводит правила tweet_filter под наши аккаунты. Возвращает rule_id.
+
+        Webhook URL через API не задаётся вообще — только в веб-кабинете,
+        Tweet Filter Rules -> поле Webhook URL. Поэтому здесь его нет.
+
+        Идемпотентна: правила с нашим тегом сносятся и создаются заново,
+        иначе повторный вызов молча удвоил бы счёт за проверки.
+
+        Правило создаётся неактивным (is_effect=0), активируется отдельным
+        update_rule — у них так устроено, без второго вызова оно не работает.
+
+        Осторожно: update_rule отвечает "update rule failed", если тело не
+        меняет ни одного поля. Здесь изменение всегда есть (is_effect 0->1),
+        но при правках следить, чтобы вызов не превратился в no-op.
         """
-        for handle in handles:
+        interval = (
+            interval_seconds
+            if interval_seconds is not None
+            else self._settings.filter_interval_seconds
+        )
+
+        for rule in await self.list_rules():
+            if str(rule.get("tag", "")).startswith(RULE_TAG_PREFIX):
+                try:
+                    await self.delete_rule(rule["rule_id"])
+                    log.info("снял старое правило %s", rule["rule_id"])
+                except (httpx.HTTPError, TwitterApiIoError) as exc:
+                    log.error("не смог снять правило %s: %s", rule.get("rule_id"), exc)
+
+        rule_ids: list[str] = []
+        for chunk, value in enumerate(build_rule_values(handles)):
+            tag = f"{RULE_TAG_PREFIX}-{chunk}"
             try:
                 resp = await self._client.post(
-                    "/oapi/x_user_stream/add_user_to_monitor_tweet",
-                    json={"userName": handle, "webhookUrl": webhook_url},
+                    "/oapi/tweet_filter/add_rule",
+                    json={"tag": tag, "value": value, "interval_seconds": interval},
                 )
-                resp.raise_for_status()
-                log.info("подписан на @%s", handle)
-            except httpx.HTTPError as exc:
-                log.error("не смог подписаться на @%s: %s", handle, exc)
+                rule_id = _checked(resp).get("rule_id")
+                if not rule_id:
+                    log.error("add_rule без rule_id: %s", resp.text[:200])
+                    continue
+
+                # Активация. update_rule требует все поля, не только is_effect.
+                resp = await self._client.post(
+                    "/oapi/tweet_filter/update_rule",
+                    json={
+                        "rule_id": rule_id,
+                        "tag": tag,
+                        "value": value,
+                        "interval_seconds": interval,
+                        "is_effect": 1,
+                    },
+                )
+                _checked(resp)
+
+                rule_ids.append(rule_id)
+                log.info("правило %s активно: %s", rule_id, value)
+            except (httpx.HTTPError, TwitterApiIoError) as exc:
+                log.error("не смог завести правило %r: %s", value, exc)
+
+        if not rule_ids:
+            log.error("не заведено ни одного правила — стрима не будет")
+        return rule_ids
 
     async def fetch_last_tweets(self, handle: str, since_id: str | None = None) -> list[Tweet]:
         """Резервный поллинг. Дороже стрима — использовать точечно."""
@@ -150,8 +251,8 @@ class TwitterApiIoClient:
             params["sinceId"] = since_id
         try:
             resp = await self._client.get("/twitter/user/last_tweets", params=params)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
+            data = _checked(resp)
+        except (httpx.HTTPError, TwitterApiIoError) as exc:
             log.error("поллинг @%s упал: %s", handle, exc)
             return []
-        return extract_tweets(resp.json())
+        return extract_tweets(data)
