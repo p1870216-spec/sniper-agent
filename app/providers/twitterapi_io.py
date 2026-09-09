@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -109,6 +110,10 @@ def normalize_tweet(payload: dict[str, Any]) -> Tweet | None:
 # Тег, по которому узнаём свои правила среди чужих в том же аккаунте.
 RULE_TAG_PREFIX = "sniper"
 
+# Free-tier пропускает один запрос в 5 секунд, отсюда пауза и ретраи.
+RETRY_ATTEMPTS = 4
+RETRY_BASE_DELAY = 6.0
+
 # Лимит поля value у них — 255 символов, длинный список KOL режем на части.
 RULE_VALUE_LIMIT = 255
 
@@ -167,12 +172,38 @@ class TwitterApiIoClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def _request(self, method: str, path: str, **kw: Any) -> httpx.Response:
+        """Запрос с ретраями на 429 и на обрыв связи.
+
+        На free-tier лимит — один запрос в 5 секунд, а register_stream
+        делает несколько вызовов подряд и без пауз ловит 429. Сетевые
+        обрывы тоже наблюдались живьём, причём на DELETE: правило тогда
+        остаётся висеть, поэтому повтор здесь важнее экономии времени.
+        """
+        delay = RETRY_BASE_DELAY
+        last: Exception | None = None
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                resp = await self._client.request(method, path, **kw)
+                if resp.status_code != 429:
+                    return resp
+                log.warning("429 на %s, жду %.0fс", path, delay)
+            except httpx.HTTPError as exc:
+                last = exc
+                log.warning("%s на %s, повтор через %.0fс", type(exc).__name__, path, delay)
+            if attempt < RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(delay)
+                delay *= 2
+        if last is not None:
+            raise last
+        raise TwitterApiIoError(f"{path}: не пробился через лимит запросов")
+
     async def list_rules(self) -> list[dict[str, Any]]:
-        resp = await self._client.get("/oapi/tweet_filter/get_rules")
+        resp = await self._request("GET", "/oapi/tweet_filter/get_rules")
         return _checked(resp).get("rules") or []
 
     async def delete_rule(self, rule_id: str) -> None:
-        resp = await self._client.request(
+        resp = await self._request(
             "DELETE", "/oapi/tweet_filter/delete_rule", json={"rule_id": rule_id}
         )
         _checked(resp)
@@ -213,7 +244,8 @@ class TwitterApiIoClient:
         for chunk, value in enumerate(build_rule_values(handles)):
             tag = f"{RULE_TAG_PREFIX}-{chunk}"
             try:
-                resp = await self._client.post(
+                resp = await self._request(
+                    "POST",
                     "/oapi/tweet_filter/add_rule",
                     json={"tag": tag, "value": value, "interval_seconds": interval},
                 )
@@ -223,7 +255,8 @@ class TwitterApiIoClient:
                     continue
 
                 # Активация. update_rule требует все поля, не только is_effect.
-                resp = await self._client.post(
+                resp = await self._request(
+                    "POST",
                     "/oapi/tweet_filter/update_rule",
                     json={
                         "rule_id": rule_id,
