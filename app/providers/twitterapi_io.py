@@ -6,8 +6,10 @@
   * polling — /twitter/user/last_tweets по кругу. Запасной вариант, дороже.
               В их же доках написано не дёргать этот эндпоинт часто.
 
-ВАЖНО: имена полей в ответе стоит сверить с актуальными доками
-(https://docs.twitterapi.io) — API живой и поля периодически меняются.
+Формат сверен с живым ответом /twitter/user/last_tweets 2026-09-09:
+поля camelCase (createdAt, author.userName, isReply) — как в api-reference.
+Блог про вебхуки описывает их иначе (created_at, author.username) — там
+ошибка, верить api-reference. API живой, при странностях сверять заново.
 Вся привязка к формату собрана в normalize_tweet(), правится в одном месте.
 """
 
@@ -58,6 +60,9 @@ def normalize_tweet(payload: dict[str, Any]) -> Tweet | None:
         or ""
     ).lstrip("@")
 
+    # У ретвитов text обрезан ~140 символами с многоточием, полный текст
+    # лежит в retweeted_tweet.text. Пайплайн ретвиты отбрасывает, но если
+    # это изменится — брать текст оттуда, иначе CA в хвосте потеряется.
     text = payload.get("text") or payload.get("full_text") or ""
 
     expanded: list[str] = []
@@ -75,13 +80,24 @@ def normalize_tweet(payload: dict[str, Any]) -> Tweet | None:
         created_at=_parse_created_at(payload.get("createdAt") or payload.get("created_at")),
         expanded_urls=expanded,
         is_retweet=bool(payload.get("retweeted_tweet") or text.startswith("RT @")),
-        is_reply=bool(payload.get("inReplyToId") or payload.get("in_reply_to_status_id")),
+        is_reply=bool(
+            payload.get("isReply")
+            or payload.get("inReplyToId")
+            or payload.get("in_reply_to_status_id")
+        ),
         raw=payload,
     )
 
 
 def extract_tweets(payload: dict[str, Any]) -> list[Tweet]:
-    """Достаёт твиты из тела вебхука или из ответа last_tweets."""
+    """Достаёт твиты из тела вебхука или из ответа last_tweets.
+
+    Реальный конверт last_tweets (сверено 2026-09-09):
+        {"status", "code", "msg", "has_next_page", "next_cursor",
+         "data": {"pin_tweet": ..., "tweets": [...]}}
+    Твиты лежат в data.tweets, а не в топ-левел tweets, как написано в
+    доках — это ловится веткой с вложенным ключом ниже.
+    """
     candidates: list[dict[str, Any]] = []
     for key in ("tweets", "data", "events", "results"):
         value = payload.get(key)
