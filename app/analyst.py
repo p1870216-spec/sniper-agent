@@ -141,7 +141,10 @@ class Analyst:
         except ImportError:
             log.error("пакет anthropic не установлен — разбор выключен")
             return
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        # Сеть на этой машине рвётся: первый же боевой прогон дал
+        # Connection error на одном твите из двух. Разбор не срочный —
+        # лучше потратить лишние секунды на повтор, чем потерять вердикт.
+        self._client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=4)
         log.info("разбор твитов включён, модель %s", model)
 
     @property
