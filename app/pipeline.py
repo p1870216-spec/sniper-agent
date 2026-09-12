@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from app.analyst import Analyst
 from app.config import Kol, Settings, load_kols
 from app.dedup import Dedup
 from app.models import Tweet
@@ -12,10 +13,17 @@ log = logging.getLogger(__name__)
 
 
 class Pipeline:
-    def __init__(self, settings: Settings, dedup: Dedup, notifier: Notifier):
+    def __init__(
+        self,
+        settings: Settings,
+        dedup: Dedup,
+        notifier: Notifier,
+        analyst: Analyst | None = None,
+    ):
         self._settings = settings
         self._dedup = dedup
         self._notifier = notifier
+        self._analyst = analyst
         self._kols: dict[str, Kol] = load_kols()
 
     async def handle(self, tweet: Tweet) -> None:
@@ -36,7 +44,7 @@ class Pipeline:
 
         for token in result.tokens:
             count = await self._dedup.register_token(token.address, tweet.author)
-            await self._notifier.send(tweet, token, kol, count)
+            message_id = await self._notifier.send(tweet, token, kol, count)
             log.info(
                 "алерт: %s (%s) от @%s, задержка %.1fс, упоминаний %d",
                 token.address,
@@ -44,4 +52,23 @@ class Pipeline:
                 tweet.author,
                 tweet.latency_seconds,
                 count,
+            )
+
+            # Второй этап. Идёт после отправки намеренно: разбор занимает
+            # секунды, и держать из-за него алерт значило бы разменять
+            # ключевую метрику на удобство.
+            if message_id is None or self._analyst is None or not self._analyst.enabled:
+                continue
+            verdict = await self._analyst.judge(tweet, token, count)
+            if verdict is None:
+                continue
+            await self._notifier.attach_verdict(
+                message_id, tweet, token, kol, count, verdict
+            )
+            log.info(
+                "вердикт по %s: %s (%.0f%%) — %s",
+                token.address,
+                verdict.kind,
+                verdict.confidence * 100,
+                verdict.reason,
             )

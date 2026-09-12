@@ -7,6 +7,7 @@ from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.analyst import KIND_MARK, Verdict
 from app.config import Kol
 from app.models import Tweet
 from app.parser import TokenMention
@@ -40,7 +41,13 @@ def _keyboard(token: TokenMention, tweet: Tweet) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def render(tweet: Tweet, token: TokenMention, kol: Kol | None, mention_count: int) -> str:
+def render(
+    tweet: Tweet,
+    token: TokenMention,
+    kol: Kol | None,
+    mention_count: int,
+    verdict: "Verdict | None" = None,
+) -> str:
     mark = TIER_MARK.get(kol.tier if kol else 3, "⚪")
     tier_text = f"tier {kol.tier}" if kol else "не в списке"
 
@@ -59,6 +66,15 @@ def render(tweet: Tweet, token: TokenMention, kol: Kol | None, mention_count: in
         snippet = snippet[:277] + "..."
     lines += ["", f"<i>{html.escape(snippet)}</i>", "", f"задержка: {tweet.latency_seconds:.1f}с"]
 
+    # Вердикт дописывается вторым этапом, уже в отправленное сообщение.
+    if verdict is not None:
+        mark = KIND_MARK.get(verdict.kind, verdict.kind)
+        lines += [
+            "",
+            f"{mark} · уверенность {verdict.confidence:.0%}",
+            f"<i>{html.escape(verdict.reason)}</i>",
+        ]
+
     return "\n".join(lines)
 
 
@@ -76,9 +92,11 @@ class Notifier:
         token: TokenMention,
         kol: Kol | None,
         mention_count: int,
-    ) -> None:
+    ) -> int | None:
+        """Отправляет алерт. Возвращает id сообщения — по нему потом
+        дописывается вердикт разбора. None, если отправка не удалась."""
         try:
-            await self._bot.send_message(
+            message = await self._bot.send_message(
                 chat_id=self._chat_id,
                 text=render(tweet, token, kol, mention_count),
                 parse_mode=ParseMode.HTML,
@@ -87,3 +105,31 @@ class Notifier:
             )
         except Exception as exc:  # noqa: BLE001 — алерт не должен ронять пайплайн
             log.exception("не отправил алерт: %s", exc)
+            return None
+        return message.message_id
+
+    async def attach_verdict(
+        self,
+        message_id: int,
+        tweet: Tweet,
+        token: TokenMention,
+        kol: Kol | None,
+        mention_count: int,
+        verdict: Verdict,
+    ) -> None:
+        """Дописывает вердикт в уже отправленный алерт.
+
+        Правка, а не второе сообщение: иначе на каждый токен в чат
+        падало бы по два уведомления.
+        """
+        try:
+            await self._bot.edit_message_text(
+                chat_id=self._chat_id,
+                message_id=message_id,
+                text=render(tweet, token, kol, mention_count, verdict),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_keyboard(token, tweet),
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("не дописал вердикт в %s: %s", message_id, exc)

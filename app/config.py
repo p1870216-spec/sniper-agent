@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     # меньше, тем дороже — считать проверки перед тем, как крутить вниз.
     filter_interval_seconds: float = 5.0
 
+    # Разбор твита моделью перед тем, как считать алерт руководством к
+    # действию. Пустой ключ = разбор выключен, пайплайн работает как раньше.
+    anthropic_api_key: str | None = None
+    analyst_model: str = "claude-opus-5"
+    # Разбор идёт уже после отправки алерта, так что таймаут щедрый:
+    # тормозить он может только дописывание вердикта, но не сам алерт.
+    analyst_timeout_seconds: float = 20.0
+
     kols_path: Path = Path("config/kols.yml")
 
 

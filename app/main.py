@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
+from app.analyst import Analyst
 from app.config import get_settings, load_kols
 from app.dedup import Dedup
 from app.notifier import Notifier
@@ -29,16 +30,25 @@ async def lifespan(app: FastAPI):
     notifier = Notifier(settings.telegram_token, settings.telegram_chat_id)
     client = TwitterApiIoClient(settings)
 
+    analyst = Analyst(
+        settings.anthropic_api_key,
+        settings.analyst_model,
+        settings.analyst_timeout_seconds,
+    )
+
     state["settings"] = settings
     state["dedup"] = dedup
     state["notifier"] = notifier
     state["client"] = client
-    state["pipeline"] = Pipeline(settings, dedup, notifier)
+    state["analyst"] = analyst
+    state["pipeline"] = Pipeline(settings, dedup, notifier, analyst)
 
     log.info("загружено KOL: %d", len(load_kols()))
     yield
 
-    await asyncio.gather(client.aclose(), notifier.aclose(), dedup.aclose())
+    await asyncio.gather(
+        client.aclose(), notifier.aclose(), dedup.aclose(), analyst.aclose()
+    )
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
