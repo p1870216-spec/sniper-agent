@@ -56,6 +56,7 @@ class Verdict(BaseModel):
     kind: Kind = Field(description="категория твита")
     confidence: float = Field(ge=0.0, le=1.0, description="уверенность 0..1")
     reason: str = Field(description="одно короткое предложение по-русски, почему так")
+    translation: str = Field(description="перевод текста твита на русский")
 
 
 SYSTEM = """Ты фильтр крипто-снайпера. На вход — твит инфлюенсера, в котором
@@ -78,30 +79,42 @@ SYSTEM = """Ты фильтр крипто-снайпера. На вход — �
 Различай по тому, обращён ли текст к читателю как призыв, или описывает то,
 что уже произошло.
 
-Отвечай только структурой. reason — одно короткое предложение по-русски."""
+Отвечай только структурой.
+reason — одно короткое предложение по-русски.
+translation — перевод текста твита на русский. Тикеры ($PONCAT), адреса
+контрактов и ссылки оставляй как есть, не транслитерируй. Жаргон переводи
+по смыслу, а не буквально: ape in — "заходить", rug — "скам", mcap —
+"капитализация". Если твит уже по-русски, верни его без изменений."""
 
 # Примеры настоящие, из data/labeling_set.csv — не выдуманные.
 EXAMPLES: list[tuple[str, str]] = [
     (
         "$PONCAT  CA:  0x886d84051b933a34fa92692461615bede617f57a  Fomo link: ...",
         '{"kind":"call","confidence":0.95,'
-        '"reason":"Тикер и адрес поданы как прямой призыв входить."}',
+        '"reason":"Тикер и адрес поданы как прямой призыв входить.",'
+        '"translation":"$PONCAT  Контракт: 0x886d84051b933a34fa92692461615bede617f57a  '
+        'Ссылка на фомо: ..."}',
     ),
     (
         "$Ember second leg pumped from 2.2M to 68M mcap. 3rd leg is gonna melt faces.",
         '{"kind":"discussion","confidence":0.9,'
-        '"reason":"Описывает уже случившийся рост по своей позиции, а не вход."}',
+        '"reason":"Описывает уже случившийся рост по своей позиции, а не вход.",'
+        '"translation":"$Ember на второй волне вырос с 2,2 млн до 68 млн капитализации. '
+        'Третья волна снесёт всем лица."}',
     ),
     (
         "If I was the president of the United States, I would force the other "
         "countries to hold a minimum of $500m in solana:6p6xgHyF... coin",
         '{"kind":"joke","confidence":0.92,'
-        '"reason":"Риторическая фигура про политику, адрес попал мимоходом."}',
+        '"reason":"Риторическая фигура про политику, адрес попал мимоходом.",'
+        '"translation":"Будь я президентом США, я бы заставил другие страны держать '
+        'минимум 500 млн долларов в монете solana:6p6xgHyF..."}',
     ),
     (
         "This is a $Coin  This is a $Coin  This is a $Coin  Ca: 2SAJiAL5... #Coin #Coin",
         '{"kind":"spam","confidence":0.94,'
-        '"reason":"Повторяющийся текст и гирлянда хештегов — накрутка."}',
+        '"reason":"Повторяющийся текст и гирлянда хештегов — накрутка.",'
+        '"translation":"Это $Coin  Это $Coin  Это $Coin  Контракт: 2SAJiAL5... #Coin #Coin"}',
     ),
 ]
 
@@ -221,6 +234,7 @@ class Analyst:
                 "source": token.source,
                 "confidence": f"{verdict.confidence:.2f}",
                 "is_reply": int(tweet.is_reply),
+                "translation": verdict.translation,
                 "text": tweet.text.replace("\n", " ").strip(),
                 "url": tweet.url,
                 "tweet_id": tweet.id,

@@ -16,15 +16,22 @@ log = logging.getLogger(__name__)
 
 TIER_MARK = {1: "🔴", 2: "🟡", 3: "⚪"}
 
+SHARPE_RUG_CHECK = "https://www.sharpe.ai/rug-check"
+
 
 def _keyboard(token: TokenMention, tweet: Tweet) -> InlineKeyboardMarkup:
     addr = token.address
+    # Sharpe не умеет ссылку на произвольный адрес: /rug-check/<сеть>/<адрес>
+    # отдаёт 404, страницы есть только по слагам вроде bonk. Поэтому ведём
+    # на сам инструмент — адрес в сообщении копируется одним касанием.
+    sharpe = InlineKeyboardButton(text="Sharpe раг-чек", url=SHARPE_RUG_CHECK)
     if token.chain == "solana":
         rows = [
             [
                 InlineKeyboardButton(text="DexScreener", url=f"https://dexscreener.com/solana/{addr}"),
                 InlineKeyboardButton(text="RugCheck", url=f"https://rugcheck.xyz/tokens/{addr}"),
             ],
+            [sharpe],
             [
                 InlineKeyboardButton(text="pump.fun", url=f"https://pump.fun/coin/{addr}"),
                 InlineKeyboardButton(text="Твит", url=tweet.url),
@@ -36,6 +43,7 @@ def _keyboard(token: TokenMention, tweet: Tweet) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="DexScreener", url=f"https://dexscreener.com/search?q={addr}"),
                 InlineKeyboardButton(text="Honeypot", url=f"https://honeypot.is/?address={addr}"),
             ],
+            [sharpe],
             [InlineKeyboardButton(text="Твит", url=tweet.url)],
         ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -61,12 +69,13 @@ def render(
     if mention_count > 1:
         lines.append(f"🔥 <b>упомянут {mention_count}-й раз</b> разными авторами")
 
-    snippet = tweet.text.strip()
+    # Показываем перевод: KOL пишут по-английски с жаргоном, и читать
+    # оригинал в спешке неудобно. Если разбор недоступен — оригинал.
+    snippet = (verdict.translation if verdict else tweet.text).strip()
     if len(snippet) > 280:
         snippet = snippet[:277] + "..."
     lines += ["", f"<i>{html.escape(snippet)}</i>", "", f"задержка: {tweet.latency_seconds:.1f}с"]
 
-    # Вердикт дописывается вторым этапом, уже в отправленное сообщение.
     if verdict is not None:
         mark = KIND_MARK.get(verdict.kind, verdict.kind)
         lines += [
@@ -74,6 +83,8 @@ def render(
             f"{mark} · уверенность {verdict.confidence:.0%}",
             f"<i>{html.escape(verdict.reason)}</i>",
         ]
+    else:
+        lines += ["", "⚠️ <b>без разбора</b> — модель недоступна, проверяй сам"]
 
     return "\n".join(lines)
 
@@ -92,13 +103,13 @@ class Notifier:
         token: TokenMention,
         kol: Kol | None,
         mention_count: int,
+        verdict: Verdict | None = None,
     ) -> int | None:
-        """Отправляет алерт. Возвращает id сообщения — по нему потом
-        дописывается вердикт разбора. None, если отправка не удалась."""
+        """Отправляет алерт. Возвращает id сообщения, None при ошибке."""
         try:
             message = await self._bot.send_message(
                 chat_id=self._chat_id,
-                text=render(tweet, token, kol, mention_count),
+                text=render(tweet, token, kol, mention_count, verdict),
                 parse_mode=ParseMode.HTML,
                 reply_markup=_keyboard(token, tweet),
                 disable_web_page_preview=True,
@@ -108,28 +119,3 @@ class Notifier:
             return None
         return message.message_id
 
-    async def attach_verdict(
-        self,
-        message_id: int,
-        tweet: Tweet,
-        token: TokenMention,
-        kol: Kol | None,
-        mention_count: int,
-        verdict: Verdict,
-    ) -> None:
-        """Дописывает вердикт в уже отправленный алерт.
-
-        Правка, а не второе сообщение: иначе на каждый токен в чат
-        падало бы по два уведомления.
-        """
-        try:
-            await self._bot.edit_message_text(
-                chat_id=self._chat_id,
-                message_id=message_id,
-                text=render(tweet, token, kol, mention_count, verdict),
-                parse_mode=ParseMode.HTML,
-                reply_markup=_keyboard(token, tweet),
-                disable_web_page_preview=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("не дописал вердикт в %s: %s", message_id, exc)

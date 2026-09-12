@@ -1,8 +1,13 @@
-"""Тесты двухэтапной отправки: алерт сразу, вердикт — вдогонку.
+"""Тесты фильтра «только коллы».
 
-Проверяется поведение вокруг модели, а не сама модель: сеть в тестах не
-трогается. Главное свойство, которое здесь закреплено, — алерт уходит
-независимо от того, что случилось с разбором.
+Разбор идёт до отправки и решает, слать ли вообще. Два свойства, которые
+здесь закреплены и которые легко сломать правкой:
+
+  * не-колл в чат не уходит;
+  * недоступность модели НЕ приводит к молчанию — иначе её падение
+    означало бы пропущенный настоящий колл.
+
+Сеть не трогается: модель подменена фейком.
 """
 
 import asyncio
@@ -15,11 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.analyst import Analyst, Verdict
 from app.config import Kol
 from app.models import Tweet
-from app.notifier import render
+from app.notifier import SHARPE_RUG_CHECK, _keyboard, render
 from app.parser import TokenMention
 from app.pipeline import Pipeline
 
 ADDR = "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E"
+EVM_ADDR = "0x886d84051b933a34fa92692461615bede617f57a"
 
 
 def make_tweet(text: str = f"CA: {ADDR}") -> Tweet:
@@ -35,36 +41,37 @@ def make_tweet(text: str = f"CA: {ADDR}") -> Tweet:
 
 
 TOKEN = TokenMention(address=ADDR, chain="solana", source="text", confidence=0.8)
-VERDICT = Verdict(kind="joke", confidence=0.91, reason="Риторическая фигура.")
+EVM_TOKEN = TokenMention(address=EVM_ADDR, chain="evm", source="text", confidence=0.85)
+
+CALL = Verdict(
+    kind="call", confidence=0.95, reason="Прямой призыв входить.",
+    translation="$PONCAT Контракт: 0x886d... не пропустите вход",
+)
+JOKE = Verdict(
+    kind="joke", confidence=0.9, reason="Риторическая фигура.",
+    translation="Будь я президентом США, я бы заставил другие страны держать монету",
+)
 
 
 class FakeDedup:
-    def __init__(self):
-        self.count = 1
-
     async def seen_tweet(self, tweet_id):
         return False
 
     async def register_token(self, address, author):
-        return self.count
+        return 1
 
 
 class FakeNotifier:
-    def __init__(self, message_id=42):
-        self.message_id = message_id
+    def __init__(self):
         self.sent = []
-        self.attached = []
 
-    async def send(self, tweet, token, kol, mention_count):
-        self.sent.append(token.address)
-        return self.message_id
-
-    async def attach_verdict(self, message_id, tweet, token, kol, mention_count, verdict):
-        self.attached.append((message_id, verdict.kind))
+    async def send(self, tweet, token, kol, mention_count, verdict=None):
+        self.sent.append((token.address, verdict.kind if verdict else None))
+        return 42
 
 
 class FakeAnalyst:
-    def __init__(self, verdict=VERDICT, enabled=True):
+    def __init__(self, verdict=CALL, enabled=True):
         self._verdict = verdict
         self._enabled = enabled
         self.calls = 0
@@ -82,76 +89,92 @@ class Settings:
     pass
 
 
-def run_pipeline(notifier, analyst, text=f"CA: {ADDR}"):
+def run(notifier, analyst):
     pipe = Pipeline(Settings(), FakeDedup(), notifier, analyst)
-    asyncio.run(pipe.handle(make_tweet(text)))
-    return pipe
+    asyncio.run(pipe.handle(make_tweet()))
+
+
+def test_call_is_sent():
+    notifier = FakeNotifier()
+    run(notifier, FakeAnalyst(CALL))
+    assert notifier.sent == [(ADDR, "call")]
+
+
+def test_joke_is_dropped():
+    """Главное новое свойство: не-колл в чат не уходит."""
+    notifier = FakeNotifier()
+    run(notifier, FakeAnalyst(JOKE))
+    assert notifier.sent == []
+
+
+def test_every_non_call_kind_is_dropped():
+    for kind in ("discussion", "joke", "warning", "spam", "unclear"):
+        notifier = FakeNotifier()
+        v = Verdict(kind=kind, confidence=0.8, reason="повод", translation="перевод")
+        run(notifier, FakeAnalyst(v))
+        assert notifier.sent == [], f"{kind} не должен отправляться"
+
+
+def test_analysis_failure_still_sends():
+    """Модель недоступна — шлём без фильтра, а не молчим."""
+    notifier = FakeNotifier()
+    run(notifier, FakeAnalyst(verdict=None))
+    assert notifier.sent == [(ADDR, None)]
+
+
+def test_disabled_analyst_sends_everything():
+    notifier, analyst = FakeNotifier(), FakeAnalyst(enabled=False)
+    run(notifier, analyst)
+    assert analyst.calls == 0
+    assert notifier.sent == [(ADDR, None)]
+
+
+def test_no_analyst_at_all():
+    notifier = FakeNotifier()
+    run(notifier, None)
+    assert notifier.sent == [(ADDR, None)]
 
 
 def test_analyst_disabled_without_key():
-    """Нет ключа — модуль молча выключен, а не падает."""
     a = Analyst(None, "claude-opus-5")
     assert not a.enabled
     assert asyncio.run(a.judge(make_tweet(), TOKEN, 1)) is None
 
 
-def test_alert_sent_then_verdict_attached():
-    notifier, analyst = FakeNotifier(), FakeAnalyst()
-    run_pipeline(notifier, analyst)
-    assert notifier.sent == [ADDR]
-    assert notifier.attached == [(42, "joke")]
+def test_render_shows_translation_not_original():
+    tweet = make_tweet("aped in hard, this one runs")
+    text = render(tweet, TOKEN, Kol(handle="x", tier=1), 1, CALL)
+    assert "не пропустите вход" in text
+    assert "aped in hard" not in text
 
 
-def test_alert_survives_failed_analysis():
-    """Разбор вернул None — алерт всё равно отправлен, дописывания нет."""
-    notifier, analyst = FakeNotifier(), FakeAnalyst(verdict=None)
-    run_pipeline(notifier, analyst)
-    assert notifier.sent == [ADDR]
-    assert notifier.attached == []
+def test_render_without_verdict_falls_back_to_original():
+    tweet = make_tweet("aped in hard")
+    text = render(tweet, TOKEN, Kol(handle="x", tier=1), 1)
+    assert "aped in hard" in text
+    assert "без разбора" in text
 
 
-def test_no_analyst_at_all():
-    """Пайплайн без разбора работает как раньше."""
-    notifier = FakeNotifier()
-    run_pipeline(notifier, None)
-    assert notifier.sent == [ADDR]
-    assert notifier.attached == []
-
-
-def test_disabled_analyst_not_called():
-    notifier, analyst = FakeNotifier(), FakeAnalyst(enabled=False)
-    run_pipeline(notifier, analyst)
-    assert analyst.calls == 0
-    assert notifier.attached == []
-
-
-def test_no_verdict_when_send_failed():
-    """Сообщения нет — дописывать некуда, модель зря не дёргаем."""
-    notifier, analyst = FakeNotifier(message_id=None), FakeAnalyst()
-    run_pipeline(notifier, analyst)
-    assert analyst.calls == 0
-    assert notifier.attached == []
-
-
-def test_render_without_verdict_has_no_verdict_block():
-    text = render(make_tweet(), TOKEN, Kol(handle="x", tier=1), 1)
-    assert "уверенность" not in text
-    assert ADDR in text
-
-
-def test_render_with_verdict_shows_kind_and_reason():
-    text = render(make_tweet(), TOKEN, Kol(handle="x", tier=1), 1, VERDICT)
-    assert "шутка" in text
-    assert "Риторическая фигура." in text
-    assert "91%" in text
-
-
-def test_render_escapes_verdict_reason():
-    """reason приходит от модели — в HTML-разметку его пускать нельзя."""
-    nasty = Verdict(kind="call", confidence=0.5, reason="<b>жирный</b> & хвост")
+def test_render_escapes_model_output():
+    """reason и translation приходят от модели — в HTML их пускать нельзя."""
+    nasty = Verdict(
+        kind="call", confidence=0.5,
+        reason="<b>жирный</b>", translation="<script>alert(1)</script> и хвост",
+    )
     text = render(make_tweet(), TOKEN, None, 1, nasty)
     assert "<b>жирный</b>" not in text
-    assert "&lt;b&gt;" in text
+    assert "<script>" not in text
+    assert "&lt;" in text
+
+
+def test_sharpe_button_on_both_chains():
+    for token in (TOKEN, EVM_TOKEN):
+        urls = [
+            b.url
+            for row in _keyboard(token, make_tweet()).inline_keyboard
+            for b in row
+        ]
+        assert SHARPE_RUG_CHECK in urls, f"нет кнопки Sharpe для {token.chain}"
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from app.analyst import Analyst
+from app.analyst import ACTIONABLE, Analyst
 from app.config import Kol, Settings, load_kols
 from app.dedup import Dedup
 from app.models import Tweet
@@ -44,31 +44,40 @@ class Pipeline:
 
         for token in result.tokens:
             count = await self._dedup.register_token(token.address, tweet.author)
-            message_id = await self._notifier.send(tweet, token, kol, count)
+
+            # Разбор идёт ДО отправки: в чат уходят только коллы, значит
+            # решение нужно принять раньше, чем слать. Это стоит секунд
+            # задержки — сознательный размен точности на скорость.
+            verdict = None
+            if self._analyst is not None and self._analyst.enabled:
+                verdict = await self._analyst.judge(tweet, token, count)
+
+                # Вердикт есть и это не колл — молчим.
+                if verdict is not None and verdict.kind not in ACTIONABLE:
+                    log.info(
+                        "отброшено (%s, %.0f%%): %s от @%s — %s",
+                        verdict.kind,
+                        verdict.confidence * 100,
+                        token.address,
+                        tweet.author,
+                        verdict.reason,
+                    )
+                    continue
+
+                # Вердикта нет — модель недоступна. Шлём как есть: молчать
+                # из-за её недоступности значит пропустить настоящий колл.
+                if verdict is None:
+                    log.warning(
+                        "разбор недоступен, шлю %s без фильтра", token.address
+                    )
+
+            await self._notifier.send(tweet, token, kol, count, verdict)
             log.info(
-                "алерт: %s (%s) от @%s, задержка %.1fс, упоминаний %d",
+                "алерт: %s (%s) от @%s, задержка %.1fс, упоминаний %d, вердикт %s",
                 token.address,
                 token.chain,
                 tweet.author,
                 tweet.latency_seconds,
                 count,
-            )
-
-            # Второй этап. Идёт после отправки намеренно: разбор занимает
-            # секунды, и держать из-за него алерт значило бы разменять
-            # ключевую метрику на удобство.
-            if message_id is None or self._analyst is None or not self._analyst.enabled:
-                continue
-            verdict = await self._analyst.judge(tweet, token, count)
-            if verdict is None:
-                continue
-            await self._notifier.attach_verdict(
-                message_id, tweet, token, kol, count, verdict
-            )
-            log.info(
-                "вердикт по %s: %s (%.0f%%) — %s",
-                token.address,
-                verdict.kind,
-                verdict.confidence * 100,
-                verdict.reason,
+                verdict.kind if verdict else "нет",
             )
