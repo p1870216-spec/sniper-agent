@@ -10,6 +10,11 @@
 именно на неё пайплайн отправляет одно сообщение.
 
 Запуск:  python tools/collect_dataset.py [--pages N] [--since-days N]
+                                        [--handles a,b] [--out ИМЯ]
+
+--handles берёт аккаунты списком вместо kols.yml, --out пишет в файлы
+с другим именем: так можно докачать один аккаунт, не трогая набор,
+который уже размечают.
 
 Сырые твиты кешируются в data/raw_tweets.json — повторный запуск не
 перекачивает то, что уже скачано. Лимит free-tier (1 запрос / 5 с)
@@ -39,8 +44,6 @@ from app.providers.twitterapi_io import normalize_tweet  # noqa: E402
 API = "https://api.twitterapi.io/twitter/user/last_tweets"
 PAUSE = 5.5                                  # free-tier: 1 запрос / 5 с
 RAW = ROOT / "data" / "raw_tweets.json"
-CSV_OUT = ROOT / "data" / "labeling_set.csv"
-JSONL_OUT = ROOT / "data" / "labeling_set.jsonl"
 
 # Разметка: одна из этих меток в колонку label.
 LABELS = """call      — свежий колл, по нему имеет смысл действовать
@@ -99,7 +102,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pages", type=int, default=15, help="максимум страниц на аккаунт")
     ap.add_argument("--since-days", type=int, default=180, help="как глубоко копать")
+    ap.add_argument("--handles", default="", help="аккаунты через запятую вместо kols.yml")
+    ap.add_argument("--out", default="labeling_set", help="имя выходных файлов без расширения")
     args = ap.parse_args()
+
+    csv_out = ROOT / "data" / f"{args.out}.csv"
+    jsonl_out = ROOT / "data" / f"{args.out}.jsonl"
 
     headers = {"X-API-Key": api_key()}
     since = datetime.now(timezone.utc) - timedelta(days=args.since_days)
@@ -109,7 +117,10 @@ def main() -> None:
         raw = json.loads(RAW.read_text(encoding="utf-8"))
         print(f"кеш: {sum(len(v) for v in raw.values())} твитов по {len(raw)} аккаунтам")
 
-    handles = list(load_kols().keys())
+    if args.handles:
+        handles = [h.strip().lstrip("@").lower() for h in args.handles.split(",") if h.strip()]
+    else:
+        handles = list(load_kols().keys())
     for i, handle in enumerate(handles, 1):
         if handle in raw:
             print(f"[{i}/{len(handles)}] {handle}: уже в кеше ({len(raw[handle])})")
@@ -124,7 +135,8 @@ def main() -> None:
     # --- разбор: пара (твит, токен) = одна строка разметки ---
     rows = []
     total = skipped_rt = 0
-    for handle, tweets in raw.items():
+    for handle in handles:
+        tweets = raw.get(handle) or []
         for t in tweets:
             tweet = normalize_tweet(t)
             if tweet is None:
@@ -154,11 +166,15 @@ def main() -> None:
 
     rows.sort(key=lambda r: r["created_at"], reverse=True)
 
-    with CSV_OUT.open("w", encoding="utf-8-sig", newline="") as f:
+    if not rows:
+        print("ни одного срабатывания парсера — файлы не пишу")
+        return
+
+    with csv_out.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()), delimiter=";")
         w.writeheader()
         w.writerows(rows)
-    with JSONL_OUT.open("w", encoding="utf-8") as f:
+    with jsonl_out.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
@@ -170,8 +186,8 @@ def main() -> None:
     print(f"уникальных адресов  : {uniq_addr}")
     print(f"авторов в наборе    : {len({r['author'] for r in rows})}")
     print()
-    print(f"-> {CSV_OUT}")
-    print(f"-> {JSONL_OUT}")
+    print(f"-> {csv_out}")
+    print(f"-> {jsonl_out}")
     print()
     print("метки для колонки label:")
     print(LABELS)
