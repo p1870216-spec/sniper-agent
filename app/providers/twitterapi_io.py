@@ -208,6 +208,25 @@ class TwitterApiIoClient:
         )
         _checked(resp)
 
+    async def set_rule_effect(self, rule: dict[str, Any], active: bool) -> None:
+        """Включает или выключает правило.
+
+        update_rule требует все поля, а не только is_effect, поэтому
+        остальные берём из самого правила и передаём без изменений.
+        """
+        resp = await self._request(
+            "POST",
+            "/oapi/tweet_filter/update_rule",
+            json={
+                "rule_id": rule["rule_id"],
+                "tag": rule["tag"],
+                "value": rule["value"],
+                "interval_seconds": rule["interval_seconds"],
+                "is_effect": 1 if active else 0,
+            },
+        )
+        _checked(resp)
+
     async def register_stream(
         self, handles: list[str], interval_seconds: float | None = None
     ) -> list[str]:
