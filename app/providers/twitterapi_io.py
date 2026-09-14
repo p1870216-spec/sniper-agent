@@ -208,6 +208,17 @@ class TwitterApiIoClient:
         )
         _checked(resp)
 
+    async def get_balance(self) -> int:
+        """Остаток кредитов.
+
+        Единственный надёжный признак того, что правило работает: баланс
+        убывает на каждой проверке. Поля last_tweet_id и cost_credit в
+        самом правиле для этого не годятся — они не обновляются вообще
+        (проверено 2026-09-12: оставались нулевыми при списании кредитов).
+        """
+        resp = await self._request("GET", "/oapi/my/info")
+        return int(_checked(resp).get("recharge_credits") or 0)
+
     async def set_rule_effect(self, rule: dict[str, Any], active: bool) -> None:
         """Включает или выключает правило.
 

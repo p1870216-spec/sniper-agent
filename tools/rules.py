@@ -41,14 +41,12 @@ FIELDS = ("rule_id", "tag", "value", "interval_seconds", "is_effect",
 
 
 def show(rule: dict) -> None:
+    # last_tweet_id и cost_credit не выводим намеренно: twitterapi.io их не
+    # обновляет, они всегда 0 и создают ложное впечатление, что правило стоит.
     state = "ВКЛ " if rule.get("is_effect") else "выкл"
     print(f"  [{state}] {rule.get('tag')}  {rule.get('rule_id')}")
     print(f"         value: {rule.get('value')}")
-    print(
-        f"         интервал {rule.get('interval_seconds')}с · "
-        f"последний твит {rule.get('last_tweet_id')} · "
-        f"потрачено {rule.get('cost_credit')}"
-    )
+    print(f"         интервал {rule.get('interval_seconds')}с")
 
 
 async def main(command: str) -> int:
@@ -62,8 +60,12 @@ async def main(command: str) -> int:
             for rule in rules:
                 show(rule)
             print()
-            print("last_tweet_id = 0 при включённом правиле значит, что оно")
-            print("ещё ничего не обработало — смотри подписку в кабинете.")
+            print(f"баланс: {await client.get_balance()} кредитов")
+            print()
+            print("Работает ли правило, видно по двум признакам:")
+            print("  1. баланс убывает — запусти list ещё раз через пару минут;")
+            print("  2. в логах есть твиты от аккаунтов из списка:")
+            print('     docker compose logs sniper --since 1h | findstr "алерт отброшено"')
             return 0
 
         if command == "sync":
