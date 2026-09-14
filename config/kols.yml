@@ -28,3 +28,20 @@ accounts:
   - handle: MattShiller_
     tier: 2
     note: "1 твит/день, 1 строка в наборе; держим на испытательный срок"
+
+  # --- добавлены 2026-09-14, замер по последним ~20 твитам ---
+  - handle: TheDazzleNovak
+    tier: 1
+    note: "5 твитов/день, контракт в 7 из 18 — вторая плотность после DegenCapitalLLC"
+  - handle: cryptogle
+    tier: 2
+    note: "6.7 твитов/день, контракт в 2 из 10"
+  - handle: SolSwizzle
+    tier: 2
+    note: "2.9 твитов/день, контракт в 1 из 18"
+  - handle: ether_monk
+    tier: 3
+    note: "0.7 твитов/день, контракт в 1 из 19; мало постит"
+  - handle: iruletrenches
+    tier: 3
+    note: "19.5 твитов/день, но контракт в 0 из 15; возможно постит CA в реплаях, их last_tweets не отдаёт"
