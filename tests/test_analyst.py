@@ -1,23 +1,26 @@
-"""Тесты фильтра «только коллы».
+"""Тесты фильтра коллов.
 
-Разбор идёт до отправки и решает, слать ли вообще. Два свойства, которые
-здесь закреплены и которые легко сломать правкой:
+Разбор идёт до отправки и решает, слать ли. Свойства, которые здесь
+закреплены и которые легко сломать правкой:
 
-  * не-колл в чат не уходит;
-  * недоступность модели НЕ приводит к молчанию — иначе её падение
-    означало бы пропущенный настоящий колл.
+  * уверенный не-колл в чат не уходит;
+  * НЕуверенный не-колл уходит — ночь 15-16.09 показала, что именно там
+    прячутся настоящие коллы (paid, xl, doom отброшены при 60-78%);
+  * недоступность модели НЕ приводит к молчанию;
+  * модели передаётся, в который раз автор упоминает адрес.
 
-Сеть не трогается: модель подменена фейком.
+Сеть не трогается: модель и Redis подменены фейками.
 """
 
 import asyncio
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.analyst import Analyst, Verdict
+from app.analyst import EXAMPLES, Analyst, Verdict, _render_request
 from app.config import Kol
 from app.models import Tweet
 from app.notifier import SHARPE_RUG_CHECK, _keyboard, render
@@ -43,22 +46,29 @@ def make_tweet(text: str = f"CA: {ADDR}") -> Tweet:
 TOKEN = TokenMention(address=ADDR, chain="solana", source="text", confidence=0.8)
 EVM_TOKEN = TokenMention(address=EVM_ADDR, chain="evm", source="text", confidence=0.85)
 
+
+def verdict(kind: str, confidence: float) -> Verdict:
+    return Verdict(kind=kind, confidence=confidence, reason="повод", translation="перевод")
+
+
 CALL = Verdict(
     kind="call", confidence=0.95, reason="Прямой призыв входить.",
     translation="$PONCAT Контракт: 0x886d... не пропустите вход",
 )
-JOKE = Verdict(
-    kind="joke", confidence=0.9, reason="Риторическая фигура.",
-    translation="Будь я президентом США, я бы заставил другие страны держать монету",
-)
 
 
 class FakeDedup:
+    def __init__(self, author_seq: int = 1):
+        self.author_seq = author_seq
+
     async def seen_tweet(self, tweet_id):
         return False
 
     async def register_token(self, address, author):
         return 1
+
+    async def author_mention(self, address, author):
+        return self.author_seq
 
 
 class FakeNotifier:
@@ -75,22 +85,24 @@ class FakeAnalyst:
         self._verdict = verdict
         self._enabled = enabled
         self.calls = 0
+        self.author_seq = None
 
     @property
     def enabled(self):
         return self._enabled
 
-    async def judge(self, tweet, token, mention_count):
+    async def judge(self, tweet, token, mention_count, author_seq=1):
         self.calls += 1
+        self.author_seq = author_seq
         return self._verdict
 
 
 class Settings:
-    pass
+    analyst_drop_confidence = 0.8
 
 
-def run(notifier, analyst):
-    pipe = Pipeline(Settings(), FakeDedup(), notifier, analyst)
+def run(notifier, analyst, dedup=None):
+    pipe = Pipeline(Settings(), dedup or FakeDedup(), notifier, analyst)
     asyncio.run(pipe.handle(make_tweet()))
 
 
@@ -100,23 +112,29 @@ def test_call_is_sent():
     assert notifier.sent == [(ADDR, "call")]
 
 
-def test_joke_is_dropped():
-    """Главное новое свойство: не-колл в чат не уходит."""
-    notifier = FakeNotifier()
-    run(notifier, FakeAnalyst(JOKE))
-    assert notifier.sent == []
-
-
-def test_every_non_call_kind_is_dropped():
+def test_confident_non_call_is_dropped():
     for kind in ("discussion", "joke", "warning", "spam", "unclear"):
         notifier = FakeNotifier()
-        v = Verdict(kind=kind, confidence=0.8, reason="повод", translation="перевод")
-        run(notifier, FakeAnalyst(v))
-        assert notifier.sent == [], f"{kind} не должен отправляться"
+        run(notifier, FakeAnalyst(verdict(kind, 0.9)))
+        assert notifier.sent == [], f"уверенный {kind} не должен отправляться"
+
+
+def test_uncertain_non_call_is_sent():
+    """Случай paid: discussion при 60% — это слать, а не молчать."""
+    notifier = FakeNotifier()
+    run(notifier, FakeAnalyst(verdict("discussion", 0.6)))
+    assert notifier.sent == [(ADDR, "discussion")]
+
+
+def test_threshold_boundary():
+    below, at = FakeNotifier(), FakeNotifier()
+    run(below, FakeAnalyst(verdict("discussion", 0.79)))
+    run(at, FakeAnalyst(verdict("discussion", 0.80)))
+    assert below.sent == [(ADDR, "discussion")], "ниже порога — отправка"
+    assert at.sent == [], "на пороге — уже уверенность, отбрасываем"
 
 
 def test_analysis_failure_still_sends():
-    """Модель недоступна — шлём без фильтра, а не молчим."""
     notifier = FakeNotifier()
     run(notifier, FakeAnalyst(verdict=None))
     assert notifier.sent == [(ADDR, None)]
@@ -135,10 +153,38 @@ def test_no_analyst_at_all():
     assert notifier.sent == [(ADDR, None)]
 
 
+def test_author_seq_reaches_analyst():
+    analyst = FakeAnalyst(CALL)
+    run(FakeNotifier(), analyst, FakeDedup(author_seq=5))
+    assert analyst.author_seq == 5
+
+
+def test_request_tells_first_and_repeat_mention():
+    first = _render_request(make_tweet(), TOKEN, 1, 1)
+    fifth = _render_request(make_tweet(), TOKEN, 1, 5)
+    assert "впервые" in first
+    assert "5-й раз" in fifth
+
+
+def test_examples_keep_missed_calls_as_calls():
+    """paid и xl из ночи 15-16.09 должны остаться в примерах коллами."""
+    calls = [
+        request for request, answer in EXAMPLES
+        if json.loads(answer)["kind"] == "call"
+    ]
+    assert any("$PAID" in r for r in calls)
+    assert any("$XL" in r for r in calls)
+
+
+def test_examples_are_valid_verdicts():
+    for _, answer in EXAMPLES:
+        Verdict(**json.loads(answer))
+
+
 def test_analyst_disabled_without_key():
     a = Analyst(None, "claude-opus-5")
     assert not a.enabled
-    assert asyncio.run(a.judge(make_tweet(), TOKEN, 1)) is None
+    assert asyncio.run(a.judge(make_tweet(), TOKEN, 1, 1)) is None
 
 
 def test_render_shows_translation_not_original():

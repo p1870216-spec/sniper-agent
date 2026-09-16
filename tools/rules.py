@@ -65,7 +65,7 @@ async def main(command: str) -> int:
             print("Работает ли правило, видно по двум признакам:")
             print("  1. баланс убывает — запусти list ещё раз через пару минут;")
             print("  2. в логах есть твиты от аккаунтов из списка:")
-            print('     docker compose logs sniper --since 1h | findstr "алерт отброшено"')
+            print('     docker compose logs sniper --since 1h | findstr "получен алерт отброшено уверена"')
             return 0
 
         if command == "sync":

@@ -34,3 +34,21 @@ class Dedup:
             pipe.scard(key)
             _, _, count = await pipe.execute()
         return int(count)
+
+    # Сколько помнить, что автор уже давал адрес. Шести часов, как у счётчика
+    # авторов, мало: KOL сопровождают позицию днями.
+    AUTHOR_MENTION_TTL = 7 * 24 * 3600
+
+    async def author_mention(self, address: str, author: str) -> int:
+        """Какой по счёту раз этот автор упоминает адрес за последние 7 дней.
+
+        1 — первое упоминание, главный признак колла. Повторы — обычно
+        сопровождение позиции: 15.09 Degen дал $Scribe пять раз за 2.5 часа,
+        и на каждый уходил отдельный алерт.
+        """
+        key = f"mention:{address.lower()}:{author.lower()}"
+        async with self._redis.pipeline() as pipe:
+            pipe.incr(key)
+            pipe.expire(key, self.AUTHOR_MENTION_TTL)
+            count, _ = await pipe.execute()
+        return int(count)

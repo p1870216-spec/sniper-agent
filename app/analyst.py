@@ -1,20 +1,17 @@
-"""LLM-разбор твита перед тем, как считать алерт руководством к действию.
+"""LLM-разбор твита: решает, уходит ли алерт в чат.
 
 Парсер отвечает на вопрос «есть ли в тексте адрес контракта» и отвечает
 на него точно. Он не отвечает на вопрос «это призыв покупать сейчас или
 трёп про токен, который автор держит третью неделю» — этот вопрос лежит
 вне регулярок в принципе.
 
-Замер на реальных данных (2026-09-11): из 13 срабатываний парсера по
-списку KOL действующими коллами выглядели 3-4. Остальное — комментарии
-о торгующихся токенах, шутки и шилл-спам.
+Разбор идёт до отправки: в чат уходят коллы. Не-колл отбрасывается, только
+если модель в нём уверена (порог analyst_drop_confidence в настройках),
+иначе алерт уходит с пометкой вердикта. Ночь 15→16.09 показала цену
+строгости: три настоящих колла — paid (+14450%), xl, doom — были отброшены
+как «обсуждение» при уверенности 60-78%.
 
-Модуль намеренно НЕ блокирует отправку. Пайплайн шлёт алерт сразу, а
-вердикт дописывает в уже отправленное сообщение через пару секунд:
-ключевая метрика latency остаётся нетронутой, а суждение приходит
-вовремя — за две секунды сделку всё равно не совершить.
-
-Без ANTHROPIC_API_KEY модуль выключен, пайплайн работает как раньше.
+Без ANTHROPIC_API_KEY модуль выключен, пайплайн шлёт всё найденное.
 """
 
 from __future__ import annotations
@@ -60,24 +57,34 @@ class Verdict(BaseModel):
 
 
 SYSTEM = """Ты фильтр крипто-снайпера. На вход — твит инфлюенсера, в котором
-автоматический парсер нашёл адрес контракта. Твоя задача — определить, чем
-этот твит является на самом деле.
+автоматический парсер нашёл адрес контракта. Реши, чем этот твит является.
+
+Аккаунты в списке — колл-каналы: подписчики покупают по их постам. Поэтому
+колл у них редко выглядит как прямое «покупай». Чаще это тикер, адрес и один
+довод: что механика проекта работает, сколько ещё может вырасти, что «может
+поехать».
 
 Категории:
-- call — свежий призыв покупать конкретный токен прямо сейчас. Адрес подан
-  как руководство к действию: "CA: ...", "aped in", новый запуск.
-- discussion — разговор о токене, который уже торгуется: динамика цены,
-  капитализация, обновления проекта, сопровождение своей позиции. Адрес
-  приведён для справки, а не как призыв входить.
+- call — автор даёт токен как возможность для входа. Главный признак —
+  ПЕРВОЕ упоминание этого адреса автором (в запросе есть строка, впервые ли
+  он его упоминает). Первое упоминание с тикером и адресом считай коллом,
+  даже если оно подано как наблюдение, тезис или сравнение с другим токеном.
+  Повторное упоминание тоже бывает коллом, если текст прямо зовёт входить.
+- discussion — сопровождение токена, который автор УЖЕ давал: отчёт о росте
+  позиции, иксы, апдейты проекта. Типичный признак — повторное упоминание.
 - joke — шутка, мем, риторическая фигура, где адрес попал в текст мимоходом.
 - warning — предупреждение о скаме, руге, ханипоте.
 - spam — накрутка: повторяющийся текст, гирлянда тикеров и хештегов.
-- unclear — по тексту определить невозможно.
+- unclear — адрес не про токен (например, кошелёк для перевода) или по
+  тексту определить невозможно.
 
-Важно: сам факт наличия адреса ничего не решает. Крипто-инфлюенсеры постят
-адрес и когда зовут покупать, и когда хвастаются иксами по старой позиции.
-Различай по тому, обращён ли текст к читателю как призыв, или описывает то,
-что уже произошло.
+Сомневаешься между call и discussion при первом упоминании — выбирай call:
+пропущенный колл обходится дороже лишнего сообщения.
+
+confidence — уверенность в категории от 0 до 1. Не завышай её: при
+неоднозначном тексте она должна быть низкой. Неуверенные вердикты бот не
+отбрасывает, а отправляет — так что честная неуверенность защищает от
+пропуска.
 
 Отвечай только структурой.
 reason — одно короткое предложение по-русски.
@@ -86,52 +93,115 @@ translation — перевод текста твита на русский. Ти
 по смыслу, а не буквально: ape in — "заходить", rug — "скам", mcap —
 "капитализация". Если твит уже по-русски, верни его без изменений."""
 
-# Примеры настоящие, из data/labeling_set.csv — не выдуманные.
-EXAMPLES: list[tuple[str, str]] = [
-    (
-        "$PONCAT  CA:  0x886d84051b933a34fa92692461615bede617f57a  Fomo link: ...",
-        '{"kind":"call","confidence":0.95,'
-        '"reason":"Тикер и адрес поданы как прямой призыв входить.",'
-        '"translation":"$PONCAT  Контракт: 0x886d84051b933a34fa92692461615bede617f57a  '
-        'Ссылка на фомо: ..."}',
-    ),
-    (
-        "$Ember second leg pumped from 2.2M to 68M mcap. 3rd leg is gonna melt faces.",
-        '{"kind":"discussion","confidence":0.9,'
-        '"reason":"Описывает уже случившийся рост по своей позиции, а не вход.",'
-        '"translation":"$Ember на второй волне вырос с 2,2 млн до 68 млн капитализации. '
-        'Третья волна снесёт всем лица."}',
-    ),
-    (
-        "If I was the president of the United States, I would force the other "
-        "countries to hold a minimum of $500m in solana:6p6xgHyF... coin",
-        '{"kind":"joke","confidence":0.92,'
-        '"reason":"Риторическая фигура про политику, адрес попал мимоходом.",'
-        '"translation":"Будь я президентом США, я бы заставил другие страны держать '
-        'минимум 500 млн долларов в монете solana:6p6xgHyF..."}',
-    ),
-    (
-        "This is a $Coin  This is a $Coin  This is a $Coin  Ca: 2SAJiAL5... #Coin #Coin",
-        '{"kind":"spam","confidence":0.94,'
-        '"reason":"Повторяющийся текст и гирлянда хештегов — накрутка.",'
-        '"translation":"Это $Coin  Это $Coin  Это $Coin  Контракт: 2SAJiAL5... #Coin #Coin"}',
-    ),
-]
 
-
-def _render_request(tweet: Tweet, token: TokenMention, mention_count: int) -> str:
-    seen = (
+def _render(
+    *,
+    author: str,
+    chain: str,
+    source: str,
+    mention_count: int,
+    author_seq: int,
+    is_reply: bool,
+    text: str,
+) -> str:
+    seq = (
+        "Автор упоминает этот адрес впервые за последние 7 дней."
+        if author_seq <= 1
+        else f"Автор упоминает этот адрес уже {author_seq}-й раз за последние 7 дней."
+    )
+    authors = (
         f"Адрес уже упоминали {mention_count} разных авторов за последние часы."
         if mention_count > 1
-        else "Адрес встречается впервые за окно дедупликации."
+        else "Другие авторы этот адрес за последние часы не упоминали."
     )
     return (
-        f"Автор: @{tweet.author}\n"
-        f"Сеть: {token.chain}, адрес найден в: {token.source}\n"
-        f"{seen}\n"
-        f"Это реплай: {'да' if tweet.is_reply else 'нет'}\n\n"
-        f"Текст твита:\n{tweet.text}"
+        f"Автор: @{author}\n"
+        f"Сеть: {chain}, адрес найден в: {source}\n"
+        f"{seq}\n"
+        f"{authors}\n"
+        f"Это реплай: {'да' if is_reply else 'нет'}\n\n"
+        f"Текст твита:\n{text}"
     )
+
+
+def _render_request(
+    tweet: Tweet, token: TokenMention, mention_count: int, author_seq: int
+) -> str:
+    return _render(
+        author=tweet.author,
+        chain=token.chain,
+        source=token.source,
+        mention_count=mention_count,
+        author_seq=author_seq,
+        is_reply=tweet.is_reply,
+        text=tweet.text,
+    )
+
+
+def _example(text: str, *, author: str, chain: str, author_seq: int, **answer) -> tuple[str, str]:
+    request = _render(
+        author=author, chain=chain, source="text",
+        mention_count=1, author_seq=author_seq, is_reply=False, text=text,
+    )
+    return request, json.dumps(answer, ensure_ascii=False)
+
+
+# Все примеры настоящие. paid и xl — ровно те твиты, которые прежний промпт
+# отбросил как «обсуждение» в ночь 15→16.09; здесь они размечены как коллы.
+EXAMPLES: list[tuple[str, str]] = [
+    _example(
+        "$PONCAT  CA:  0x886d84051b933a34fa92692461615bede617f57a  Fomo link: ...",
+        author="zenkaixbt", chain="evm", author_seq=1,
+        kind="call", confidence=0.95,
+        reason="Тикер и адрес поданы как прямой призыв входить.",
+        translation="$PONCAT  Контракт: 0x886d84051b933a34fa92692461615bede617f57a  Ссылка на фомо: ...",
+    ),
+    _example(
+        "$PAID  It’s really working, i just checked a launch on PF where they "
+        "redirected the fees to an X user.   98kfF7rmsg1QDUEoCqNE7g7M1FdrTt92TEp2CLzypump",
+        author="dr_crypto_calls", chain="solana", author_seq=1,
+        kind="call", confidence=0.85,
+        reason="Первое упоминание нового токена с адресом и доводом, что механика работает, — наводка на вход.",
+        translation="$PAID  Это действительно работает, я только что проверил запуск на PF, где комиссии "
+                    "перенаправили пользователю X.   98kfF7rmsg1QDUEoCqNE7g7M1FdrTt92TEp2CLzypump",
+    ),
+    _example(
+        "$XL still x10 to go to catch $PAID. Older + different chain.  "
+        "0x1cDb289BeFDFaC8aF945a288BCdcCc382cB34d32",
+        author="dr_crypto_calls", chain="evm", author_seq=1,
+        kind="call", confidence=0.85,
+        reason="Впервые даёт токен с адресом и тезисом о потенциале роста — колл, хотя подан как сравнение.",
+        translation="$XL ещё x10 до уровня $PAID. Старше и на другой сети.  "
+                    "0x1cDb289BeFDFaC8aF945a288BCdcCc382cB34d32",
+    ),
+    _example(
+        "$Scribe  170k -----------&gt; 2.8M mcap   16x in an hour.  Lfgooo  First mover tech.  "
+        "6rHkNb7HCtkpvdnVJsBCZHH5dw3AndqEjfmbEGhooR7t",
+        author="DegenCapitalLLC", chain="solana", author_seq=5,
+        kind="discussion", confidence=0.85,
+        reason="Пятое упоминание того же токена: автор отчитывается о росте позиции, а не даёт новый вход.",
+        translation="$Scribe  170k -----------> 2,8 млн капитализации   16x за час.  Поехали  "
+                    "Технология первопроходца.  6rHkNb7HCtkpvdnVJsBCZHH5dw3AndqEjfmbEGhooR7t",
+    ),
+    _example(
+        "If I was the president of the United States, I would force the other countries "
+        "to hold a minimum of $500m in solana:6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN coin",
+        author="crypto_bitlord7", chain="solana", author_seq=1,
+        kind="joke", confidence=0.92,
+        reason="Риторическая фигура про политику, адрес попал мимоходом.",
+        translation="Будь я президентом США, я бы заставил другие страны держать минимум "
+                    "500 млн долларов в монете solana:6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    ),
+    _example(
+        "This is a $Coin  This is a $Coin  This is a $Coin  "
+        "Ca: 2SAJiAL5FSTJ42bRivHJEYnhY7oS27ZQrJDgetDEpump #Coin #Coin",
+        author="Jrem_Verse", chain="solana", author_seq=1,
+        kind="spam", confidence=0.94,
+        reason="Повторяющийся текст и гирлянда хештегов — накрутка.",
+        translation="Это $Coin  Это $Coin  Это $Coin  "
+                    "Контракт: 2SAJiAL5FSTJ42bRivHJEYnhY7oS27ZQrJDgetDEpump #Coin #Coin",
+    ),
+]
 
 
 class Analyst:
@@ -155,8 +225,8 @@ class Analyst:
             log.error("пакет anthropic не установлен — разбор выключен")
             return
         # Сеть на этой машине рвётся: первый же боевой прогон дал
-        # Connection error на одном твите из двух. Разбор не срочный —
-        # лучше потратить лишние секунды на повтор, чем потерять вердикт.
+        # Connection error на одном твите из двух. Лучше потратить лишние
+        # секунды на повтор, чем отправить алерт без разбора.
         self._client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=4)
         log.info("разбор твитов включён, модель %s", model)
 
@@ -169,22 +239,29 @@ class Analyst:
             await self._client.close()
 
     async def judge(
-        self, tweet: Tweet, token: TokenMention, mention_count: int
+        self,
+        tweet: Tweet,
+        token: TokenMention,
+        mention_count: int,
+        author_seq: int = 1,
     ) -> Verdict | None:
         """Вердикт по твиту. None — если разбор недоступен или упал.
 
-        Исключения наружу не выпускает: алерт уже отправлен, и падение
-        разбора не должно превращаться в потерю сообщения.
+        Исключения наружу не выпускает: падение разбора не должно
+        превращаться в потерю алерта — пайплайн тогда шлёт без фильтра.
         """
         if self._client is None:
             return None
 
         messages: list[dict] = []
-        for text, answer in EXAMPLES:
-            messages.append({"role": "user", "content": text})
+        for request, answer in EXAMPLES:
+            messages.append({"role": "user", "content": request})
             messages.append({"role": "assistant", "content": answer})
         messages.append(
-            {"role": "user", "content": _render_request(tweet, token, mention_count)}
+            {
+                "role": "user",
+                "content": _render_request(tweet, token, mention_count, author_seq),
+            }
         )
 
         try:
@@ -206,7 +283,7 @@ class Analyst:
             log.warning("разбор твита %s вернул пустой результат", tweet.id)
             return None
 
-        self._record(tweet, token, mention_count, verdict)
+        self._record(tweet, token, mention_count, author_seq, verdict)
         return verdict
 
     def _record(
@@ -214,6 +291,7 @@ class Analyst:
         tweet: Tweet,
         token: TokenMention,
         mention_count: int,
+        author_seq: int,
         verdict: Verdict,
     ) -> None:
         """Пишет вердикт в jsonl.
@@ -239,6 +317,7 @@ class Analyst:
                 "url": tweet.url,
                 "tweet_id": tweet.id,
                 "mention_count": mention_count,
+                "author_seq": author_seq,
                 "model": self._model,
             }
             with VERDICT_LOG.open("a", encoding="utf-8") as f:
