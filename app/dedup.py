@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+
 import redis.asyncio as redis
+from redis.exceptions import RedisError
 
 
 class Dedup:
@@ -19,6 +22,13 @@ class Dedup:
 
     async def aclose(self) -> None:
         await self._redis.aclose()
+
+    async def ping(self) -> bool:
+        """Отвечает ли Redis"""
+        try:
+            return bool(await asyncio.wait_for(self._redis.ping(), timeout=2))
+        except (RedisError, OSError, asyncio.TimeoutError):
+            return False
 
     async def seen_tweet(self, tweet_id: str) -> bool:
         key = f"tweet:{tweet_id}"

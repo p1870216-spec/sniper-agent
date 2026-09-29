@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
+from fastapi.responses import JSONResponse
+
 from app.analyst import Analyst
 from app.config import get_settings, load_kols
 from app.dedup import Dedup
@@ -58,6 +60,12 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
+@app.get("/readyz")
+async def readyz():
+    dedup = state["dedup"]
+    if await dedup.ping():
+        return {"status": "ok"}
+    return JSONResponse(status_code=503, content={"status": "redis unavailable"})    
 
 @app.post("/webhook/{secret}")
 async def webhook(secret: str, request: Request, background: BackgroundTasks) -> dict[str, int]:
