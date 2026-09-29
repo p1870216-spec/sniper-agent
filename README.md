@@ -1,3 +1,5 @@
+![tests](https://github.com/p1870216-spec/sniper-agent/actions/workflows/tests.yml/badge.svg)
+
 # Sniper Agent — этап 1
 
 Мониторинг твитов KOL → извлечение адреса контракта → алерт в Telegram.
