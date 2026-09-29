@@ -1,0 +1,26 @@
+- name: Деплой Sniper Agent
+  hosts: sniper
+
+  vars:
+    repo_url: https://github.com/p1870216-spec/sniper-agent.git
+    branch: main
+    app_dir: /home/ubuntu/sniper
+    local_env: /mnt/c/Users/Legion/Desktop/sniper/.env
+
+  tasks:
+    - name: Скачать или обновить код с GitHub
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_dir }}"
+        version: "{{ branch }}"
+
+    - name: Передать .env с ключами на сервер
+      ansible.builtin.copy:
+        src: "{{ local_env }}"
+        dest: "{{ app_dir }}/.env"
+        mode: "0600"
+
+    - name: Собрать и запустить контейнеры
+      ansible.builtin.command:
+        cmd: docker compose up -d --build
+        chdir: "{{ app_dir }}"

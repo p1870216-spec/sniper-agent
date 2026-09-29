@@ -1,0 +1,93 @@
+- name: Базовая настройка сервера
+  hosts: sniper
+  become: true
+
+  tasks:
+    - name: Обновить список пакетов
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Установить полезные утилиты
+      ansible.builtin.apt:
+        name:
+          - htop
+          - git
+          - curl
+        state: present
+
+    - name: Создать папку для ключей
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Скачать ключ Docker
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Подключить репозиторий Docker
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable"
+        filename: docker
+        state: present
+
+    - name: Установить Docker и Compose
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Docker запущен и стартует при загрузке
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Разрешить пользователю ubuntu работать с Docker без sudo
+      ansible.builtin.user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    - name: Установить ufw
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    - name: Разрешить SSH (ДО включения фаервола!)
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Запретить все входящие подключения по умолчанию
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    - name: Включить ufw
+      community.general.ufw:
+        state: enabled
+
+    - name: Защитить SSH (только ключи, без root)
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/10-hardening.conf
+        content: |
+          PermitRootLogin no
+          PasswordAuthentication no
+        mode: "0644"
+      notify: Перезапустить SSH
+
+  handlers:
+    - name: Перезапустить SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
