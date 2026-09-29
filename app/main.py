@@ -56,11 +56,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
-@app.get("/healthz")
+# @app.get("/healthz")
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
-@app.get("/readyz")
+# @app.get("/readyz")
+@app.api_route("/readyz", methods=["GET", "HEAD"])
 async def readyz():
     dedup = state["dedup"]
     if await dedup.ping():
