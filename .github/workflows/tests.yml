@@ -4,7 +4,13 @@ on: [push, pull_request]
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+
+    env:
+      TWITTERAPI_KEY: test-key
+      WEBHOOK_SECRET: test-secret
+      TELEGRAM_TOKEN: "123456:TEST"
+      TELEGRAM_CHAT_ID: "0"
 
     steps:
       - name: Скачать код
