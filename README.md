@@ -153,7 +153,19 @@ pytest                            # если поставлен
 
 ## Следующий этап
 
+
+
+
 - DexScreener API: капитализация, ликвидность, объём, возраст пары
 - RugCheck / GoPlus: mint authority, freeze authority, сожжён ли LP
 - Пороговые фильтры (мин. ликвидность, макс. возраст пары)
 - Таблица в Postgres + подсчёт трек-рекорда по каждому KOL
+
+
+
+
+## Результат
+<img width="470" height="392" alt="image" src="https://github.com/user-attachments/assets/ad2a549f-59b0-4349-a999-e72c8f0bd137" />
+<img width="468" height="464" alt="image" src="https://github.com/user-attachments/assets/f0f87064-0dc0-44da-8799-8c7534362d91" />
+
+
