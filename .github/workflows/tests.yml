@@ -27,3 +27,30 @@ jobs:
 
       - name: Запустить тесты
         run: pytest -v
+  image:
+    needs: pytest
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Скачать код
+        uses: actions/checkout@v5
+
+      - name: Войти в GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Собрать и отправить образ
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/p1870216-spec/sniper-agent:latest
+            ghcr.io/p1870216-spec/sniper-agent:${{ github.sha }}
