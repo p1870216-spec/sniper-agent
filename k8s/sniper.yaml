@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sniper
+  namespace: sniper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sniper
+  template:
+    metadata:
+      labels:
+        app: sniper
+    spec:
+      containers:
+        - name: sniper
+          image: ghcr.io/p1870216-spec/sniper-agent:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: sniper-env
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sniper
+  namespace: sniper
+spec:
+  selector:
+    app: sniper
+  ports:
+    - port: 8080
+      targetPort: 8080
