@@ -1,4 +1,4 @@
-- name: Деплой Sniper Agent
+- name: Деплой Sniper Agent в k3s
   hosts: sniper
 
   vars:
@@ -7,8 +7,11 @@
     app_dir: /home/ubuntu/sniper
     local_env: /mnt/c/Users/Legion/Desktop/sniper/.env
 
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
   tasks:
-    - name: Скачать или обновить код с GitHub
+    - name: Скачать или обновить код (нужны манифесты k8s/)
       ansible.builtin.git:
         repo: "{{ repo_url }}"
         dest: "{{ app_dir }}"
@@ -20,7 +23,28 @@
         dest: "{{ app_dir }}/.env"
         mode: "0600"
 
-    - name: Собрать и запустить контейнеры
+    - name: Создать namespace
       ansible.builtin.command:
-        cmd: docker compose up -d --build
+        cmd: kubectl apply -f k8s/namespace.yaml
         chdir: "{{ app_dir }}"
+
+    - name: Обновить Secret из .env
+      ansible.builtin.shell:
+        cmd: >
+          kubectl create secret generic sniper-env
+          --from-env-file=.env -n sniper
+          --dry-run=client -o yaml | kubectl apply -f -
+        chdir: "{{ app_dir }}"
+
+    - name: Применить все манифесты
+      ansible.builtin.command:
+        cmd: kubectl apply -f k8s/
+        chdir: "{{ app_dir }}"
+
+    - name: Перезапустить бота, чтобы скачать свежий образ
+      ansible.builtin.command:
+        cmd: kubectl rollout restart deployment/sniper -n sniper
+
+    - name: Дождаться, пока новая версия будет готова
+      ansible.builtin.command:
+        cmd: kubectl rollout status deployment/sniper -n sniper --timeout=120s
